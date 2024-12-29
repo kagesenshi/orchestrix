@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings
+import pendulum
 
 class OrchestrixSettings(BaseSettings):
     db_url: str = 'sqlite+aiosqlite:///./orchestrix.db'
@@ -7,7 +8,7 @@ class OrchestrixSettings(BaseSettings):
     db_pool_recycle: int = 3600
     db_echo: bool = False
     db_pool_pre_ping: bool = True
-    timezone: str = 'UTC'
+    timezone: str = pendulum.local_timezone().name
 
     class Config:
         env_prefix = 'ORCHESTRIX_'

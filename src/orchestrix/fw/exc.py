@@ -17,7 +17,7 @@ class NotFoundError(OrchestrixError):
             detail = [{
                 "msg": message
             }]
-        if isinstance(detail, list):
+        elif isinstance(detail, list):
             detail.append({
                 'msg': message
             })

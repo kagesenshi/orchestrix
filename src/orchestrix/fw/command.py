@@ -34,11 +34,11 @@ def construct_command(name: str, model: type[BaseModel],
             is_urn = False
 
         if is_urn:
-            matches = [i.id for i in items if i.urn == name]
+            matches = [i.urn for i in items if i.urn == name]
         elif is_uuid:
-            matches = [i.id for i in items if i.id == name]
+            matches = [i.urn for i in items if i.id == name]
         else:
-            matches = [i.id for i in items if i.name == name]
+            matches = [i.urn for i in items if i.name == name]
         if matches:
             return matches[0]
         else:
@@ -52,6 +52,22 @@ def construct_command(name: str, model: type[BaseModel],
     def list():
         with httpx.Client() as client:
             response = client.get(f"{server}/{service_path}")
+            items = [model.model_validate(i) for i in response.json()['records']]
+            data = [i.model_dump() for i in items]
+            if not data:
+                print("No items found")
+                return
+            for row in data:
+                # hide uid fields
+                for f in ['uid', 'id']:
+                    del row[f]
+            tbl = tabulate(data, headers='keys')
+            print(tbl)
+
+    @click.command()
+    def history():
+        with httpx.Client() as client:
+            response = client.get(f"{server}/{service_path}/+history")
             items = [model.model_validate(i) for i in response.json()['records']]
             data = [i.model_dump() for i in items]
             if not data:
@@ -94,6 +110,30 @@ def construct_command(name: str, model: type[BaseModel],
             tbl = tabulate([model.model_validate(response.json()['record']).model_dump()], headers='keys')
             print(tbl)
 
+    @click.command()
+    @click.argument('name')
+    def history(name):
+        with httpx.Client() as client:
+            try:
+                item_id = get_item_id(client, name, service_path)
+            except ValueError:
+                print(f"No item with name {name}", file=sys.stderr)
+                return
+            response = client.get(f"{server}/{service_path}/{item_id}/+history")
+            items = [model.model_validate(i) for i in response.json()['records']]
+            data = [i.model_dump() for i in items]
+            if not data:
+                print("No items found")
+                return
+            for row in data:
+                # hide uid fields
+                for f in ['uid', 'id']:
+                    del row[f]
+            tbl = tabulate(data, headers='keys')
+            print(tbl)
+
+
+
 
     @click.command()
     @click.argument('name')
@@ -131,6 +171,7 @@ def construct_command(name: str, model: type[BaseModel],
             print(response.json()['status'])
 
     command.add_command(list)
+    command.add_command(history)
     command.add_command(create)
     command.add_command(show)
     command.add_command(delete)

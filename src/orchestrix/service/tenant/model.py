@@ -7,7 +7,7 @@ from uuid_extensions import uuid7
 from orchestrix.db import DbSession, metadata
 from orchestrix.fw.service import Service, redefine_model
 from orchestrix.fw.model import Core, CoreIndex
-from sqlmodel import SQLModel, Field, Session, select
+from sqlmodel import SQLModel, Field, Session, select, Relationship
 
 __all__ = ['Tenant', 'TenantSchema', 'TenantService']
 
@@ -16,7 +16,7 @@ class TenantSchema(Core):
 
 class Tenant(SQLModel, TenantSchema, table=True):
     __tablename__ = "tenants"
-    pass
+    hosts : list['orchestrix.service.host.model.Host'] = Relationship() # type: ignore
 
 class TenantService(Service[Tenant]):
 

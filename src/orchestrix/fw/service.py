@@ -9,7 +9,7 @@ import sqlalchemy.exc as saexc
 from orchestrix.db import DbSession
 from orchestrix.fw.model import ts_now, Core, is_valid_urn
 from orchestrix.fw.exc import ModelValidationError, AlreadyExistError
-from typing import Generic, TypeVar, Any, Literal, Annotated, Union
+from typing import Generic, TypeVar, Any, Literal, Annotated, Union, List
 import abc
 import jinja2 as j2
 from .exc import NotFoundError
@@ -99,13 +99,17 @@ class Service(Generic[S], abc.ABC):
         self.request = request
         self.db = db
 
+    def urn(self, model: Core):
+        namespace = self.urn_namespace()
+        entity_type = self.urn_entity_type()
+        urn = f'urn:{namespace}:{entity_type}:{model.name}'
+        return urn
+
     async def create(self, data: Core) -> S:
         model_class = self.__class__.model_class()
         data = await self.validate_data(data)
         parsed_data = data.model_dump(exclude=self.internal_fields())
-        namespace = self.urn_namespace()
-        entity_type = self.urn_entity_type()
-        urn = f'urn:{namespace}:{entity_type}:{data.name}'
+        urn = self.urn(data)
         parsed_data['urn'] = urn
         if not parsed_data:
             raise ValueError("No data provided")
@@ -143,6 +147,22 @@ class Service(Generic[S], abc.ABC):
         if not obj:
             raise NotFoundError(message=f"{model_class.__name__}({model_id})")
         return obj
+    
+    async def get_history(self, model_id: str | UUID) -> list[S]:
+        model_class = self.__class__.model_class()
+
+        if isinstance(model_id, str):
+            try:
+                is_valid_urn(model_id)
+                filter = model_class.urn == model_id
+            except ValueError:
+                model_id = UUID(model_id)
+                filter = model_class.id == model_id
+        else:
+            filter = model_class.id == model_id
+
+        results = await self.db.exec(select(model_class).where(filter))
+        return results
 
 
     async def update(self, model_id: str | UUID, data: Core) -> S:
@@ -165,23 +185,29 @@ class Service(Generic[S], abc.ABC):
 
     async def delete(self, model_id: str | UUID):
         model = await self.get(model_id)
-        await self.db.delete(model)
+        model.sqlmodel_update({'deleted': ts_now(), 'active': False})
         await self.db.flush()
 
-    async def list(self) -> list[S]:
+    async def list_active(self) -> list[S]:
         model_class = self.__class__.model_class()
         filter = (model_class.active == True)
         models = await self.db.exec(select(model_class).where(filter))
         return models.all()
+    
+    async def list_history(self) -> list[S]:
+        model_class = self.__class__.model_class()
+        models = await self.db.exec(select(model_class))
+        return models
+
     
     async def validate_data(self, data: Core) -> Core:
         # raise error if fail
         return data
 
     @classmethod
-    async def get_model(cls, request: fastapi.Request, urn: str) -> S:
-        svc = await cls.get_service(request)
-        return svc.get(urn)
+    async def get_model(cls, request: fastapi.Request, db: DbSession, urn: str) -> S:
+        svc = await cls.get_service(request, db)
+        return await svc.get(urn)
 
     @classmethod
     async def get_service(cls, request: fastapi.Request, db: DbSession):
@@ -208,12 +234,20 @@ class Service(Generic[S], abc.ABC):
                                      exclude=cls.internal_fields())
         UpdateModel = redefine_model(f'Update {model_class.__name__}', schema_class,
                                      exclude=cls.internal_fields() + cls.immutable_fields())
-
+        
         @router.get(service_path)
-        async def list(svc: Annotated[cls, Depends(cls.get_service)]) -> ListResult[model_class]: # type: ignore
+        async def list_active(svc: Annotated[cls, Depends(cls.get_service)]) -> ListResult[model_class]: # type: ignore
             return {
-                "records": await svc.list()
+                "records": await svc.list_active()
             }
+        
+        @router.get(f'{service_path}/+history')
+        async def list_history(svc: Annotated[cls, Depends(cls.get_service)]) -> ListResult[model_class]: # type: ignore
+            return {
+                "records": await svc.list_history()
+            }
+
+
         
         @router.post(service_path)
         async def create(svc: Annotated[cls, Depends(cls.get_service)], data: CreateModel) -> Result[model_class]: # type: ignore
@@ -221,19 +255,26 @@ class Service(Generic[S], abc.ABC):
             return {"record": created_model}
         
         @router.get(model_path)
-        async def get(model: Annotated[cls.model_class, Depends(cls.get_model)]) -> Result[model_class]: # type: ignore
+        async def get(model: Annotated[model_class, Depends(cls.get_model)]) -> Result[model_class]: # type: ignore
             return {
                 "record": model
             }
         
-        @router.put(model_path)
-        async def update(svc: Annotated[cls, Depends(cls.get_service)], 
+        @router.get(f'{model_path}/+history')
+        async def get_history(svc: Annotated[cls, Depends(cls.get_service)], model: Annotated[model_class, Depends(cls.get_model)]) -> ListResult[model_class]: # type: ignore
+            return {
+                "records": await svc.get_history(model.id)
+            }
+
+        if UpdateModel.model_fields: 
+            @router.put(model_path)
+            async def update(svc: Annotated[cls, Depends(cls.get_service)], 
                          model: Annotated[model_class, Depends(cls.get_model)], # type: ignore
                          data: UpdateModel) -> Result[model_class]: # type: ignore
-            updated_model = await svc.update(model.id, data)
-            return {
-                "record": updated_model
-            }
+                updated_model = await svc.update(model.id, data)
+                return {
+                    "record": updated_model
+                }
         
         @router.delete(model_path)
         async def delete(svc: Annotated[cls, Depends(cls.get_service)], 
