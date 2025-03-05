@@ -9,19 +9,25 @@ from orchestrix.fw.model import Core, CoreIndex, is_valid_urn
 from ..tenant.model import TenantService, Tenant
 import fastapi
 from sqlmodel import SQLModel, Field, select
-from typing import Annotated
+from typing import Annotated, Literal
 import asyncio
+import enum
 
 __all__ = ['Host', 'HostSchema', 'HostService']
 
-async def check_tenant(request: fastapi.Request, db: DbSession, tenant_urn: str) -> str:
-    tenant_service = TenantService(request, db)
-    tenant = await tenant_service.get(tenant_urn)
-    return tenant.urn
+class HostStateEnum(enum.StrEnum):
+    NEW = enum.auto()
+    REGISTERING = enum.auto()
+    REGISTERED = enum.auto()
+    ONLINE = enum.auto()
+    OFFLINE = enum.auto()
+    WARNING = enum.auto()
+    ERROR = enum.auto()
 
 class HostSchema(Core):
-    ip: str = Field()
     tenant_urn: Annotated[str, AfterValidator(is_valid_urn)] = Field(foreign_key='tenants.urn')
+    hostname: str = Field()
+    state: HostStateEnum = HostStateEnum.NEW
 
 class Host(SQLModel, HostSchema, table=True):
     __tablename__ = 'hosts'
@@ -36,18 +42,14 @@ class HostService(Service[Host]):
     def schema_class(cls) -> type[HostSchema]:
         return HostSchema
     
-    async def create(self, data_model: HostSchema):
-        return await super().create(data_model) 
-    
-    async def get(self, model_id):
-        model = await super().get(model_id)
-        return model
-    
-    async def update(self, model_id, data: HostSchema):
-        return await super().update(model_id, data)
-    
+    def urn(self, model: Host):
+        namespace = self.urn_namespace()
+        entity_type = self.urn_entity_type()
+        urn = f'urn:{namespace}:{entity_type}:host({model.tenant_urn},{model.name})'
+        return urn
+
     async def validate_data(self, data: HostSchema):
-        await check_tenant(self.request, self.db, data.tenant_urn)
+        await TenantService(self.request, self.db).get(data.tenant_urn)
         return await super().validate_data(data)
     
     async def get_tenant(self, model: Host):

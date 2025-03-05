@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, Field, create_model, AnyUrl
 import fastapi
 from fastapi import Depends
 import sqlalchemy as sa
@@ -31,8 +31,15 @@ class BaseResult(BaseModel):
 class Result(BaseResult, Generic[T]):
     record: T
 
+class PaginationMeta(BaseModel):
+    page_num: int | None = None
+    page_size: int | None = None
+    next_page: AnyUrl | None = None
+    prev_page: AnyUrl | None = None
+
 class ListResult(BaseResult, Generic[T]):
     records: list[T] | None = None
+    meta: PaginationMeta | None = None
 
 
 def redefine_model(name, Model: type[BaseModel], *, exclude=None) -> type[BaseModel]:
@@ -53,6 +60,21 @@ class Service(Generic[S], abc.ABC):
     @abc.abstractmethod
     def model_class(cls) -> type[S]:
         raise NotImplementedError("model_class must be implemented")
+    
+    @classmethod
+    def createmodel_class(cls) -> type[BaseModel]:
+        model_class = cls.model_class()
+        schema_class = cls.schema_class()
+        return redefine_model(f'Create {model_class.__name__}', schema_class, 
+                                     exclude=cls.internal_fields())
+    
+    @classmethod
+    def updatemodel_class(cls) -> type[BaseModel]:
+        model_class = cls.model_class()
+        schema_class = cls.schema_class()
+        return redefine_model(f'Update {model_class.__name__}', schema_class,
+                                     exclude=cls.internal_fields() + cls.immutable_fields())
+
 
     @classmethod
     @abc.abstractmethod
@@ -61,8 +83,7 @@ class Service(Generic[S], abc.ABC):
 
     @classmethod
     def service_path(cls) -> str:
-        model_class = cls.model_class()
-        return f'/{model_class.__name__.lower()}s'
+        return f'/{cls.urn_entity_type()}s'
 
     @classmethod
     def model_path(cls) -> str:
@@ -136,8 +157,12 @@ class Service(Generic[S], abc.ABC):
                 is_valid_urn(model_id)
                 filter = model_class.urn == model_id
             except ValueError:
-                model_id = UUID(model_id)
-                filter = model_class.id == model_id
+                try:
+                    model_id = UUID(model_id)
+                    filter = model_class.id == model_id
+                except ValueError:
+                    filter = model_class.name == model_id
+
         else:
             filter = model_class.id == model_id
 
@@ -198,6 +223,22 @@ class Service(Generic[S], abc.ABC):
         model_class = self.__class__.model_class()
         models = await self.db.exec(select(model_class))
         return models
+    
+    async def search(self, *, offset=0, limit=10, sa_filters=None, only_active=True, **filters):
+        model_class = self.__class__.model_class()
+        if only_active:
+            filter = (model_class.active == True)
+        else:
+            filter = (sa.literal(1)==1)
+        if sa_filters and filters:
+            raise ValueError("Cannot use both sa_filters and filters")
+        for field_name, value in filters.items():
+            filter &= (getattr(model_class, field_name) == value)
+        if sa_filters:
+            filter &= sa_filters
+        models = await self.db.exec(select(model_class).where(filter).offset(offset).limit(limit))
+        return models
+
 
     
     async def validate_data(self, data: Core) -> Core:
@@ -216,9 +257,11 @@ class Service(Generic[S], abc.ABC):
 
     @classmethod
     def router(cls) -> fastapi.APIRouter:
-        router = fastapi.APIRouter()
-        cls.register_views(router, cls.service_path(), cls.model_path())
-        return router
+        if not getattr(cls, '_router', None):
+            router = fastapi.APIRouter()
+            cls.register_views(router, cls.service_path(), cls.model_path())
+            cls._router = router
+        return cls._router
 
     @classmethod
     def register_views(cls, router: fastapi.APIRouter, 
@@ -228,46 +271,42 @@ class Service(Generic[S], abc.ABC):
         # Implement view registration logic here
 
         model_class = cls.model_class()
-        schema_class = cls.schema_class()
+        entity_type = cls.urn_entity_type()
 
-        CreateModel = redefine_model(f'Create {model_class.__name__}', schema_class, 
-                                     exclude=cls.internal_fields())
-        UpdateModel = redefine_model(f'Update {model_class.__name__}', schema_class,
-                                     exclude=cls.internal_fields() + cls.immutable_fields())
-        
-        @router.get(service_path)
+        CreateModel = cls.createmodel_class()
+        UpdateModel = cls.updatemodel_class()
+
+        @router.get(service_path, operation_id=f"orchestrix-list-{entity_type}")
         async def list_active(svc: Annotated[cls, Depends(cls.get_service)]) -> ListResult[model_class]: # type: ignore
             return {
                 "records": await svc.list_active()
             }
         
-        @router.get(f'{service_path}/+history')
+        @router.get(f'{service_path}/+history', operation_id=f"orchestrix-history-{entity_type}")
         async def list_history(svc: Annotated[cls, Depends(cls.get_service)]) -> ListResult[model_class]: # type: ignore
             return {
                 "records": await svc.list_history()
             }
-
-
         
-        @router.post(service_path)
+        @router.post(service_path, operation_id=f"orchestrix-create-{entity_type}")
         async def create(svc: Annotated[cls, Depends(cls.get_service)], data: CreateModel) -> Result[model_class]: # type: ignore
             created_model = await svc.create(data)
             return {"record": created_model}
         
-        @router.get(model_path)
+        @router.get(model_path, operation_id=f"orchestrix-get-{entity_type}")
         async def get(model: Annotated[model_class, Depends(cls.get_model)]) -> Result[model_class]: # type: ignore
             return {
                 "record": model
             }
         
-        @router.get(f'{model_path}/+history')
+        @router.get(f'{model_path}/+history', operation_id=f'orchestrix-get-history-{entity_type}')
         async def get_history(svc: Annotated[cls, Depends(cls.get_service)], model: Annotated[model_class, Depends(cls.get_model)]) -> ListResult[model_class]: # type: ignore
             return {
                 "records": await svc.get_history(model.id)
             }
 
         if UpdateModel.model_fields: 
-            @router.put(model_path)
+            @router.put(model_path, operation_id=f'orchestrix-update-{entity_type}')
             async def update(svc: Annotated[cls, Depends(cls.get_service)], 
                          model: Annotated[model_class, Depends(cls.get_model)], # type: ignore
                          data: UpdateModel) -> Result[model_class]: # type: ignore
@@ -276,7 +315,7 @@ class Service(Generic[S], abc.ABC):
                     "record": updated_model
                 }
         
-        @router.delete(model_path)
+        @router.delete(model_path, operation_id=f'orchestrix-delete-{entity_type}')
         async def delete(svc: Annotated[cls, Depends(cls.get_service)], 
                          model: Annotated[model_class, Depends(cls.get_model)]) -> BaseResult: # type: ignore
             await svc.delete(model.id)

@@ -9,7 +9,7 @@ from orchestrix.fw.service import Service, redefine_model
 from orchestrix.fw.model import Core, CoreIndex
 from sqlmodel import SQLModel, Field, Session, select, Relationship
 
-__all__ = ['Tenant', 'TenantSchema', 'TenantService']
+__all__ = ['Tenant', 'TenantSchema', 'TenantService', 'router']
 
 class TenantSchema(Core):
     pass
@@ -28,4 +28,4 @@ class TenantService(Service[Tenant]):
     def schema_class(cls) -> type[TenantSchema]:
         return TenantSchema
     
-    
+router = TenantService.router()   

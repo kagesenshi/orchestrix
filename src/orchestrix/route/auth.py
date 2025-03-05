@@ -1,4 +1,5 @@
 import fastapi
+from fastapi.security import OAuth2PasswordRequestForm
 
 router = fastapi.APIRouter()
 

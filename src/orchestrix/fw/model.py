@@ -25,7 +25,7 @@ def is_valid_name(name: str) -> str:
 def is_valid_urn(urn: str) -> str:
     if not urn:
         raise ValueError("URN cannot be empty")
-    if not re.match("^urn:[a-z0-9][a-z0-9-]{0,31}:[a-z0-9]+:[a-z0-9_]+$", urn):
+    if not re.match(r"^urn:[a-z0-9][a-z0-9-]{0,31}:[a-z0-9]+:[a-z0-9_\(\):,]+$", urn):
         raise ValueError("URN is not valid")
     if len(urn) > 128:
         raise ValueError("URN cannot be longer than 128 characters")
